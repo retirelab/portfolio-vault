@@ -1297,6 +1297,7 @@
         
         for (const accKey of global.accountInstances.map(i => i.instanceId)) {
           const acc = accounts[accKey];
+          if (!acc || !acc.assets) continue;
           const updates = await Promise.all(acc.assets.map(async a => {
             if (a.code && a.code.length >= 5) {
               const d = await fetchStock(a.code);
