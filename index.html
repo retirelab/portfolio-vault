@@ -5,8 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Portfolio Vault</title>
   
+  <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   
+  <!-- Babel CDN (브라우저에서 JSX 컴파일) -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <style>
@@ -55,6 +57,7 @@
 <body class="bg-slate-50">
   <div id="root"></div>
 
+  <!-- React 앱 코드 (Babel 모듈 사용) -->
   <script type="text/babel" data-type="module">
     import React, { useState, useEffect, useRef, useMemo, useCallback } from "https://esm.sh/react@18.2.0";
     import { createRoot } from "https://esm.sh/react-dom@18.2.0/client";
@@ -748,7 +751,8 @@
           totalCurrentValue: 0, allocationBaseValue: 0, parkingValue: 0, totalBookValue: 0, 
           purePrincipal: 0, totalDividend: 0, capitalGain: 0, bookReturnAmt: 0, bookReturnRate: 0, 
           principalReturnAmt: 0, principalReturnRate: 0, pctP: 0, pctD: 0, pctG: 0, yearCash: 0, 
-          riskRatio: 0, equityExposureRatio: 0, thisMonthDividend: 0, currentHoldingsChartData: []
+          riskRatio: 0, equityExposureRatio: 0, thisMonthDividend: 0, currentHoldingsChartData: [],
+          employerCash: 0, personalCash: 0
         };
         const allocationBaseValue = getAllocationBaseValue(acc.assets);
         const parkingValue = getParkingAssetValue(acc.assets);
@@ -776,6 +780,14 @@
         const pctG = (totalCurrentValue > 0 && capitalGain > 0) ? (capitalGain / totalCurrentValue) * 100 : 0;
         const yearCash = acc.contributions.filter(c => c.month.startsWith(String(currentYear)) && c.type !== "배당").reduce((s, c) => s + (Number(c.amount) || 0), 0);
         
+        const employerCash = acc.contributions
+          .filter(c => c.month.startsWith(String(currentYear)) && c.type === "회사부담금")
+          .reduce((s, c) => s + (Number(c.amount) || 0), 0);
+
+        const personalCash = acc.contributions
+          .filter(c => c.month.startsWith(String(currentYear)) && c.type === "개인추가납입")
+          .reduce((s, c) => s + (Number(c.amount) || 0), 0);
+
         const riskAssetValue = acc.assets.reduce((s, a) => s + getAssetMarketValue(a) * getRiskWeight(a), 0);
         const riskRatio = totalCurrentValue > 0 ? (riskAssetValue / totalCurrentValue) * 100 : 0;
 
@@ -802,7 +814,8 @@
           totalCurrentValue, allocationBaseValue, parkingValue, totalBookValue, 
           purePrincipal, totalDividend, capitalGain, bookReturnAmt, bookReturnRate, 
           principalReturnAmt, principalReturnRate, pctP, pctD, pctG, yearCash, 
-          riskRatio, equityExposureRatio, thisMonthDividend, currentHoldingsChartData 
+          riskRatio, equityExposureRatio, thisMonthDividend, currentHoldingsChartData,
+          employerCash, personalCash
         };
       }, [currentYear]);
 
@@ -1282,8 +1295,7 @@
         let hasErr = false;
         const accountUpdates = {};
         
-        for (const accKey of Object.keys(accounts)) {
-          if (accKey === "report") continue;
+        for (const accKey of global.accountInstances.map(i => i.instanceId)) {
           const acc = accounts[accKey];
           const updates = await Promise.all(acc.assets.map(async a => {
             if (a.code && a.code.length >= 5) {
@@ -1360,7 +1372,24 @@
 
             // Portfolio Vault 자체 백업이면 기존 importData로 처리
             if (d.schemaVersion === "portfolio_vault_v1") {
-              importData(e);
+              try {
+                if (
+                  d.accounts && typeof d.accounts === 'object' &&
+                  d.global && typeof d.global === 'object'
+                ) {
+                  const normalizedAccounts = normalizeAccounts(
+                    d.accounts,
+                    d.global.accountInstances
+                  );
+                  setAccounts(normalizedAccounts);
+                  setGlobal(d.global);
+                  showMsg("success", "Portfolio Vault 백업 복구 완료!");
+                } else {
+                  showMsg("error", "올바른 구조의 백업 파일이 아닙니다.");
+                }
+              } catch {
+                showMsg("error", "백업 파일 복구 중 오류가 발생했습니다.");
+              }
               return;
             }
 
@@ -2636,7 +2665,7 @@
                         <ul className="list-disc pl-4 space-y-1 opacity-90">
                           <li><strong>파란색(매도) 주문을 먼저</strong> 체결하여 예수금을 확보하세요.</li>
                           <li><strong>과세이연 계좌</strong>이므로 매매차익에 대한 세금은 인출 시점까지 없습니다.</li>
-                          <li>세액공제를 받지 외 초과 납입분은 <strong>납입확인서 및 불공제 확인서</strong> 제출 시 과세 제외됩니다.</li>
+                          <li>세액공제를 받지 않은 초과 납입분은 <strong>납입확인서 및 불공제 확인서</strong> 제출 시 과세 제외됩니다.</li>
                         </ul>
                       </div>
                       <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
