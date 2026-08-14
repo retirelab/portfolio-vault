@@ -194,10 +194,10 @@
 
     // 기본 인스턴스 (사용자의 실제 데이터 기반으로 복수 계좌 반영)
     const DEFAULT_ACCOUNT_INSTANCES = [
-      { instanceId: "pension_1", typeId: "pension", label: "연금저축1" },
-      { instanceId: "pension_2", typeId: "pension", label: "연금저축2" },
-      { instanceId: "irp",       typeId: "irp",     label: "IRP"      },
-      { instanceId: "isa",       typeId: "isa",     label: "ISA"      },
+      { instanceId: "pension_1", typeId: "pension", label: "연금저축1", hidden: false },
+      { instanceId: "pension_2", typeId: "pension", label: "연금저축2", hidden: false },
+      { instanceId: "irp",       typeId: "irp",     label: "IRP",       hidden: false },
+      { instanceId: "isa",       typeId: "isa",     label: "ISA",       hidden: false },
     ];
 
     // 사용자의 데이터를 익명화 및 변형하여 기본 데이터로 설정
@@ -357,6 +357,11 @@
         }
       });
 
+      // ※ 추가: accountInstances의 hidden 필드 누락 시 기본값 보장
+      // normalizeAccounts는 accounts 객체를 정리하는 함수이므로
+      // instances의 hidden 필드 보장은 별도 헬퍼로 처리한다.
+      // → 패치 3에서 처리
+
       Object.keys(next).forEach(accKey => {
         const acc = next[accKey];
         if (!acc || typeof acc !== 'object') return;
@@ -379,6 +384,15 @@
 
       return next;
     };
+
+    // accountInstances의 hidden 필드 누락 시 false로 보장
+    function normalizeInstances(instances) {
+      if (!Array.isArray(instances)) return DEFAULT_ACCOUNT_INSTANCES;
+      return instances.map(inst => ({
+        ...inst,
+        hidden: inst.hidden === true ? true : false,
+      }));
+    }
 
     // 파킹형 자산 및 분리 계산용 Helper 함수
     const isParkingAsset = (a) => Boolean(a.parkingAsset);
@@ -688,6 +702,13 @@
       // 이사 마법사 데이터 상태
       const [migrationData, setMigrationData] = useState(null);
 
+      const [tabDragIdx, setTabDragIdx] = useState(null);
+      const [tabDragOverIdx, setTabDragOverIdx] = useState(null);
+      const tabTouchStartRef = useRef({ idx: null });
+      const tabDragOverIdxRef = useRef(null);
+      const tabBarRef = useRef(null);
+      const [tabDragActive, setTabDragActive] = useState(false);
+
       const [msg, setMsg] = useState({ type: "", text: "" });
       const msgTimerRef = useRef(null);
       const [expandedAsset, setExpandedAsset] = useState(null);
@@ -722,7 +743,14 @@
           const storedGlobal = localStorage.getItem("portfolio_vault_global_v1");
           if (storedAccounts && storedGlobal) { 
             const parsedGlobal = JSON.parse(storedGlobal);
-            const parsedAccounts = normalizeAccounts(JSON.parse(storedAccounts), parsedGlobal.accountInstances);
+            // hidden 필드 누락된 구버전 데이터 보장
+            parsedGlobal.accountInstances = normalizeInstances(
+              parsedGlobal.accountInstances
+            );
+            const parsedAccounts = normalizeAccounts(
+              JSON.parse(storedAccounts),
+              parsedGlobal.accountInstances
+            );
             setAccounts(parsedAccounts); 
             setGlobal(parsedGlobal); 
           }
@@ -750,6 +778,27 @@
       const curAcc = accounts[activeAccount] || accounts[global.accountInstances[0]?.instanceId] || {};
       const curAccColor = curAccInst ? getInstanceColor(curAccInst, global.accountInstances) : "#94a3b8";
       const curAccLabel = curAccInst ? curAccInst.label : "";
+
+      // 표시 중인 인스턴스만 필터 (탭 렌더링 및 리포트 합산용)
+      const visibleInstances = global.accountInstances.filter(
+        inst => !inst.hidden
+      );
+
+      // 현재 활성 계좌가 숨겨진 경우 첫 번째 표시 계좌로 자동 이동
+      useEffect(() => {
+        if (activeAccount === "report") return;
+        const activeInst = global.accountInstances.find(
+          i => i.instanceId === activeAccount
+        );
+        if (activeInst && activeInst.hidden) {
+          const firstVisible = visibleInstances[0];
+          if (firstVisible) {
+            setActiveAccount(firstVisible.instanceId);
+          } else {
+            setActiveAccount("report");
+          }
+        }
+      }, [global.accountInstances, activeAccount]);
 
       const [rebalanceYear] = useState(currentYear);
 
@@ -841,7 +890,8 @@
       const activeHasTarget = activeAccount !== "report" && curAcc?.targetPortfolio && curAcc.targetPortfolio.length > 0 && curAcc.targetPortfolio.some(t => t.value > 0);
 
       const reportStats = useMemo(() => {
-        const allKeys = global.accountInstances.map(inst => inst.instanceId);
+        // 숨긴 계좌는 통합리포트 합산에서 제외
+        const allKeys = visibleInstances.map(inst => inst.instanceId);
         const statsMap = {};
         
         allKeys.forEach(key => {
@@ -919,13 +969,13 @@
         const creditBase = global.accountInstances
           .filter(inst => {
             const reg = getTypeRegistry(inst.typeId);
-            return reg && reg.taxCreditEligible;
+            return reg && reg.taxCreditEligible && !inst.hidden;
           })
           .reduce((sum, inst) => sum + (statsMap[inst.instanceId]?.yearCash || 0), 0);
 
         summary.estimatedTaxRefund = Math.min(creditBase, 9000000) * (global.incomeLevel === "5500이하" ? 0.165 : 0.132);
         return summary;
-      }, [accounts, global, currentYear, calcAccStats]);
+      }, [accounts, global, currentYear, calcAccStats, visibleInstances]);
 
       const buyLogic = useMemo(() => {
         const targetSum = activeAccount !== "report" && curAcc?.targetPortfolio ? curAcc.targetPortfolio.reduce((s, t) => s + (Number(t.value) || 0), 0) : 0;
@@ -1182,6 +1232,62 @@
         setDraggedIdx(null);
         setDragOverIdx(null);
       };
+      
+      const applyTabDrop = (fromIdx, toIdx) => {
+        if (fromIdx === null || toIdx === null || fromIdx === toIdx) return;
+        // visibleInstances 인덱스 → global.accountInstances 인덱스로 변환
+        const fromInst = visibleInstances[fromIdx];
+        const toInst   = visibleInstances[toIdx];
+        if (!fromInst || !toInst) return;
+        const fromGlobalIdx = global.accountInstances
+          .findIndex(i => i.instanceId === fromInst.instanceId);
+        const toGlobalIdx = global.accountInstances
+          .findIndex(i => i.instanceId === toInst.instanceId);
+        if (fromGlobalIdx === -1 || toGlobalIdx === -1) return;
+        const newInstances = [...global.accountInstances];
+        const [removed] = newInstances.splice(fromGlobalIdx, 1);
+        newInstances.splice(toGlobalIdx, 0, removed);
+        setGlobal(prev => ({ ...prev, accountInstances: newInstances }));
+        setActiveAccount(removed.instanceId);
+      };
+
+      const handleTabDragStart = (idx) => {
+        setTabDragIdx(idx);
+        setTabDragActive(true);
+      };
+
+      const handleTabDragOver = (e, idx) => {
+        e.preventDefault();
+        setTabDragOverIdx(idx);
+      };
+
+      const handleTabDrop = (idx) => {
+        applyTabDrop(tabDragIdx, idx);
+        setTabDragIdx(null);
+        setTabDragOverIdx(null);
+        setTabDragActive(false);
+      };
+
+      const handleTabDragEnd = () => {
+        setTabDragIdx(null);
+        setTabDragOverIdx(null);
+        setTabDragActive(false);
+      };
+
+      const handleTabTouchStart = (e, idx) => {
+        tabTouchStartRef.current.idx = idx;
+        setTabDragIdx(idx);
+        setTabDragActive(true);
+      };
+
+      const handleTabTouchEnd = () => {
+        applyTabDrop(tabTouchStartRef.current.idx, tabDragOverIdxRef.current);
+        tabTouchStartRef.current.idx = null;
+        tabDragOverIdxRef.current = null;
+        setTabDragIdx(null);
+        setTabDragOverIdx(null);
+        setTabDragActive(false);
+      };
       // ── DnD 끝 ──
 
       useEffect(() => {
@@ -1215,6 +1321,37 @@
         el.addEventListener('touchmove', onTouchMove, { passive: false });
         return () => el.removeEventListener('touchmove', onTouchMove);
       }, [mergedSortKey]);
+
+      useEffect(() => {
+        const el = tabBarRef.current;
+        if (!el) return;
+
+        const onTouchMove = (e) => {
+          if (tabTouchStartRef.current.idx === null) return;
+          e.preventDefault();
+
+          const touch = e.touches[0];
+          const elements = el.querySelectorAll('[data-tab-drag-idx]');
+          let closestIdx = null;
+          let closestDist = Infinity;
+          elements.forEach(elItem => {
+            const rect = elItem.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const dist = Math.abs(touch.clientX - centerX);
+            if (dist < closestDist) {
+              closestDist = dist;
+              closestIdx = parseInt(elItem.dataset.tabDragIdx, 10);
+            }
+          });
+          if (closestIdx !== null && closestIdx !== tabTouchStartRef.current.idx) {
+            tabDragOverIdxRef.current = closestIdx;
+            setTabDragOverIdx(closestIdx);
+          }
+        };
+
+        el.addEventListener('touchmove', onTouchMove, { passive: false });
+        return () => el.removeEventListener('touchmove', onTouchMove);
+      }, [tabDragActive]);
 
       const chAsset = (id, f, v) => updateAcc({ assets: curAcc.assets.map(a => a.id === id ? { ...a, [f]: v } : a) });
       const chContrib = (id, f, v) => updateAcc({ contributions: curAcc.contributions.map(c => c.id === id ? { ...c, [f]: v } : c) });
@@ -1453,6 +1590,7 @@
           instanceId: m.to,
           typeId:     m.typeId,
           label:      m.label,
+          hidden:     false,
         }));
 
         // 3. 새 accounts 객체 생성
@@ -1525,18 +1663,10 @@
       const inpBase = "w-full bg-white border border-slate-200 rounded-xl px-3 py-3 text-sm font-semibold text-slate-800 outline-none focus:border-slate-400 transition-all";
 
       const tabs = [
-        { id: "dashboard", icon: LayoutDashboard, label: "대시보드" },
+        { id: "dashboard", LayoutDashboard, label: "대시보드", icon: LayoutDashboard },
         { id: "assets", icon: List, label: "자산" },
         { id: "contributions", icon: Wallet, label: "납입" },
         { id: "settings", icon: Settings, label: "설정" },
-      ];
-
-      const topAccTabs = [
-        ...global.accountInstances.map(inst => ({
-          id:    inst.instanceId,
-          label: inst.label,
-        })),
-        { id: "report", label: "통합리포트", icon: BarChart3 },
       ];
 
       return (
@@ -1545,16 +1675,58 @@
           {/* 상단 계좌 탭 */}
           <div className="bg-slate-900 pt-4 pb-3 shadow-lg sticky top-0 z-40">
             <div className="flex items-center gap-2 px-4">
-              <div className="flex gap-2 overflow-x-auto scrollbar-hide flex-1 min-w-0">
-                {topAccTabs.map(t => (
-                  <button key={t.id} onClick={() => { setActiveAccount(t.id); setActiveTab("dashboard"); }}
-                    className={`flex-shrink-0 flex items-center gap-1.5 px-4 py-2 text-xs font-bold transition-all shadow-sm rounded-full ${activeAccount === t.id ? 'bg-white text-slate-900' : 'bg-slate-800 text-slate-400 hover:text-white'}`}>
-                    {t.icon && <t.icon size={14} />}
-                    {t.label}
-                  </button>
-                ))}
+              <div
+                ref={tabBarRef}
+                className="flex gap-2 overflow-x-auto scrollbar-hide flex-1 min-w-0"
+              >
+                {visibleInstances.map((inst, idx) => {
+                  const isDragging = tabDragIdx === idx;
+                  const isDropTarget = tabDragOverIdx === idx && tabDragIdx !== idx;
+                  const isActive = activeAccount === inst.instanceId;
+                  return (
+                    <button
+                      key={inst.instanceId}
+                      data-tab-drag-idx={idx}
+                      draggable
+                      onDragStart={() => handleTabDragStart(idx)}
+                      onDragOver={(e) => handleTabDragOver(e, idx)}
+                      onDrop={() => handleTabDrop(idx)}
+                      onDragEnd={handleTabDragEnd}
+                      onTouchStart={(e) => handleTabTouchStart(e, idx)}
+                      onTouchEnd={handleTabTouchEnd}
+                      onClick={() => { setActiveAccount(inst.instanceId); setActiveTab("dashboard"); }}
+                      className={`flex-shrink-0 flex items-center gap-1.5 px-4 py-2 text-xs font-bold transition-all shadow-sm rounded-full select-none
+                        ${isActive ? 'bg-white text-slate-900' : 'bg-slate-800 text-slate-400 hover:text-white'}
+                        ${isDragging ? 'opacity-30 scale-95' : ''}
+                        ${isDropTarget ? 'ring-2 ring-indigo-400 ring-offset-1 ring-offset-slate-900' : ''}
+                        ${tabDragActive ? 'cursor-grabbing' : 'cursor-grab'}
+                      `}
+                    >
+                      {inst.label}
+                    </button>
+                  );
+                })}
+
+                {/* 통합리포트 탭 — 고정, 드래그 제외 */}
+                <button
+                  key="report"
+                  onClick={() => { setActiveAccount("report"); setActiveTab("dashboard"); }}
+                  className={`flex-shrink-0 flex items-center gap-1.5 px-4 py-2 text-xs font-bold transition-all shadow-sm rounded-full cursor-pointer
+                    ${activeAccount === "report" ? 'bg-white text-slate-900' : 'bg-slate-800 text-slate-400 hover:text-white'}
+                  `}
+                >
+                  <BarChart3 size={14} />
+                  통합리포트
+                </button>
               </div>
             </div>
+
+            {/* 드래그 중 안내 메시지 */}
+            {tabDragActive && (
+              <p className="text-center text-[10px] text-slate-500 font-bold mt-1.5 pb-0.5">
+                탭을 원하는 위치로 드래그하세요
+              </p>
+            )}
           </div>
 
           {/* 헤더 */}
@@ -1815,7 +1987,7 @@
                     <div>
                       <label className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 mb-2 uppercase">
                         급여 구간 (세액공제율 산정용)
-                        <Tip text={"연간 총급여 기준으로 세액공제율이 달라집니다.\n\n• 5,500만원 이하: 16.5% 공제\n• 5,500만원 초과: 13.2% 공제\n\n통합리포트에서 연말정산 예상 환급금 계산에 사용됩니다."} />
+                        <Tip text={"연간 총급여 기준으로 세액공제율이 달라집니다.\n\n• 5,500만원 이하: 16.5% 공제\n• 5,500만원 초과: 13.2% 고제\n\n통합리포트에서 연말정산 예상 환급금 계산에 사용됩니다."} />
                       </label>
                       <div className="flex gap-2">
                         {[
@@ -1833,6 +2005,85 @@
                         ))}
                       </div>
                     </div>
+                  </div>
+
+                  {/* 계좌 표시 관리 */}
+                  <div className="space-y-3 pb-4 border-b border-slate-100">
+                    <p className="text-xs font-bold text-slate-500 uppercase flex items-center gap-1.5">
+                      <List size={13} /> 계좌 표시 관리
+                    </p>
+                    <p className="text-[10px] text-slate-400 font-medium leading-relaxed">
+                      숨긴 계좌는 탭과 통합리포트 합산에서 제외됩니다.
+                      데이터는 삭제되지 않습니다.
+                    </p>
+                    <div className="space-y-2">
+                      {global.accountInstances.map(inst => {
+                        const isHidden = inst.hidden === true;
+                        const instColor = getInstanceColor(inst, global.accountInstances);
+                        return (
+                          <div
+                            key={inst.instanceId}
+                            className={`flex items-center justify-between px-4 py-3 rounded-xl border transition-all
+                              ${isHidden
+                                ? 'bg-slate-50 border-slate-200 opacity-60'
+                                : 'bg-white border-slate-200'}`}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <span
+                                className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                                style={{ background: isHidden ? '#94a3b8' : instColor }}
+                              />
+                              <span className="text-xs font-bold text-slate-700 truncate">
+                                {inst.label}
+                              </span>
+                              {isHidden && (
+                                <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded flex-shrink-0">
+                                  숨김
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => {
+                                const newInstances = global.accountInstances.map(i =>
+                                  i.instanceId === inst.instanceId
+                                    ? { ...i, hidden: !isHidden }
+                                    : i
+                                );
+                                setGlobal(prev => ({
+                                  ...prev,
+                                  accountInstances: newInstances,
+                                }));
+                                // 숨기려는 계좌가 현재 활성 탭이면
+                                // 첫 번째 표시 계좌로 이동
+                                if (!isHidden && activeAccount === inst.instanceId) {
+                                  const nextVisible = newInstances.find(
+                                    i => !i.hidden && i.instanceId !== inst.instanceId
+                                  );
+                                  if (nextVisible) {
+                                    setActiveAccount(nextVisible.instanceId);
+                                  } else {
+                                    setActiveAccount("report");
+                                  }
+                                }
+                              }}
+                              className={`flex-shrink-0 text-[10px] font-bold px-3 py-1.5 rounded-lg border transition-all active:scale-95
+                                ${isHidden
+                                  ? 'bg-indigo-50 text-indigo-600 border-indigo-200 hover:bg-indigo-100'
+                                  : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'}`}
+                            >
+                              {isHidden ? '다시 표시' : '숨기기'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* 모두 숨김 경고 */}
+                    {visibleInstances.length === 0 && (
+                      <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-[11px] font-bold text-amber-700">
+                        ⚠️ 모든 계좌가 숨겨져 있습니다. 하나 이상 표시해야 합니다.
+                      </div>
+                    )}
                   </div>
 
                   {/* 백업 및 복구 */}
